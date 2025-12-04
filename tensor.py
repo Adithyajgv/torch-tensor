@@ -23,34 +23,48 @@ class TRTWrapper:
             
         print(f"Building TensorRT Engine from {self.onnx_path}...")
         
-        #Builder
+        # Setup Builder
         builder = trt.Builder(self.logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
         config = builder.create_builder_config()
         parser = trt.OnnxParser(network, self.logger)
 
-        # FP16 (Half Precision)
+        # Enable FP16 (Half Precision)
         if builder.platform_has_fast_fp16:
             config.set_flag(trt.BuilderFlag.FP16)
             print("FP16 Mode Enabled!")
         
-        #Memory Config (4GB Workspace)
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+        # Memory Config (1GB Workspace)
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
-        #Parse ONNX
-        with open(self.onnx_file_path if hasattr(self, 'onnx_file_path') else self.onnx_path, 'rb') as model:
-            if not parser.parse(model.read()):
+        # Parse ONNX
+        with open(self.onnx_path, 'rb') as model:
+            if not parser.parse_from_file(self.onnx_path):
                 print('ERROR: Failed to parse the ONNX file.')
                 for error in range(parser.num_errors):
                     print(parser.get_error(error))
                 return
 
-        # 5. Build and Serialize
-        serialized_engine = builder.build_serialized_network(network, config)
+
+        profile = builder.create_optimization_profile()
+        # Input name 'input' matches model.py export
+        # Args: name, min_shape, opt_shape, max_shape
+        # optimized for batch size 1, but allow up to 64
+        profile.set_shape("input", (1, 3, 32, 32), (1, 3, 32, 32), (64, 3, 32, 32))
+        config.add_optimization_profile(profile)
+
+        try:
+            serialized_engine = builder.build_serialized_network(network, config)
+            if serialized_engine is None:
+                print("Error: Builder failed to produce an engine.")
+                return
+
+            with open(self.engine_path, "wb") as f:
+                f.write(serialized_engine)
+            print(f"Engine built and saved to {self.engine_path}")
         
-        with open(self.engine_path, "wb") as f:
-            f.write(serialized_engine)
-        print(f"Engine built and saved to {self.engine_path}")
+        except Exception as e:
+            print(f"Build failed: {e}")
 
     def load_engine(self):
         """Loads the serialized engine from disk."""
@@ -60,7 +74,14 @@ class TRTWrapper:
         with open(self.engine_path, "rb") as f:
             runtime = trt.Runtime(self.logger)
             self.engine = runtime.deserialize_cuda_engine(f.read())
+            
+            if not self.engine:
+                raise RuntimeError("Failed to deserialize engine.")
+
             self.context = self.engine.create_execution_context()
+            
+            # specify input shape because it's dynamic
+            self.context.set_input_shape("input", (1, 3, 32, 32))
 
     def infer(self, input_data):
         """
@@ -73,30 +94,25 @@ class TRTWrapper:
         # Flatten Input
         input_data = input_data.ravel().astype(np.float32)
         
-        # Allocate Device Memory
+        # Allocate Device Memory (PyCUDA)
         d_input = cuda.mem_alloc(input_data.nbytes)
+        d_output = cuda.mem_alloc(10 * 4) # 10 classes, float32
         
-        # Output size (10 classes * 4 bytes for float32)
-        d_output = cuda.mem_alloc(10 * 4) 
-        
-        # CUDA Stream for async execution
+        #CUDA Stream
         stream = cuda.Stream()
 
-        # Host -> Device
+        #Host -> Device
         cuda.memcpy_htod_async(d_input, input_data, stream)
         
-        # Set tensor addresses (Bindings)
-        # Index 0 is  input, Index 1 is output based on ONNX export.
         self.context.set_tensor_address("input", int(d_input))
         self.context.set_tensor_address("output", int(d_output))
         
         self.context.execute_async_v3(stream_handle=stream.handle)
         
-        #Device -> Host
+        # Device -> Host
         h_output = np.empty(10, dtype=np.float32)
         cuda.memcpy_dtoh_async(h_output, d_output, stream)
         
-        #Synchronize
         stream.synchronize()
         
         return h_output
