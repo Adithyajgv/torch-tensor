@@ -1,0 +1,9 @@
+./models
+./data
+./logs
+./checkpoints
+./__pycache__/
+*.pyc
+*.pt
+*.pth
+*.onnx
