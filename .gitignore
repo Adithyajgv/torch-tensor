@@ -1,10 +1,10 @@
-models
-data
+models/
+data/
 *.env
 *.csv
 *.log
-logs
-checkpoints
+logs/
+checkpoints/
 __pycache__/
 *.pyc
 *.pt
