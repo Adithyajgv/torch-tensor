@@ -1,5 +1,5 @@
 ./models
-./data
+./data/*
 ./logs
 ./checkpoints
 ./__pycache__/
