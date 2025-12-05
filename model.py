@@ -85,16 +85,6 @@ class SimpleClassifier(nn.Module):
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def get_test_loader(batch_size=1):
-    transform = transforms.Compose([
-        transforms.ToTensor(), 
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    
-    # CIFAR-100
-    testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
-    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
-
 
 def save_model(model, path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -131,47 +121,69 @@ def export_to_onnx(model, onnx_path):
 def train_model(epochs=5):
     device = get_device()
     print(f"--- Starting Training on {device} ---")
-
-    # Data Augmentation (Crucial for larger models to prevent overfitting)
-    transform_train = transforms.Compose([
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomCrop(32, padding=4),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
-
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-    ])
+    
+    torch.backends.cudnn.benchmark = False
     
     # CIFAR-100
     print("Loading CIFAR-100...")
-    trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
-    valset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
+    trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True)
+    valset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True)
+    
+    print(f"Moving {len(trainset)} images directly to {device} VRAM...")
+    
+    class GPUAugmentation(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.aug = nn.Sequential(
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomCrop(32, padding=4)
+            )
+        def forward(self, x):
+            return self.aug(x)
+    
+    def prepare_gpu_dataset(dataset):
+        # Extract data (N, H, W, C) -> (N, C, H, W) and scale to 0-1
+        data = torch.tensor(dataset.data).permute(0, 3, 1, 2).float() / 255.0
+        targets = torch.tensor(dataset.targets).long()
+        
+        # Move to GPU immediately
+        data = data.to(device)
+        targets = targets.to(device)
+        
+        # Apply Normalization on GPU (Much faster)
+        # (0.5, 0.5, 0.5) normalization
+        data = (data - 0.5) / 0.5
+        
+        return torch.utils.data.TensorDataset(data, targets)
 
-    trainloader = DataLoader(trainset, batch_size=1024, shuffle=True, num_workers=12, pin_memory=True, persistent_workers=True) 
-    valloader = DataLoader(valset, batch_size=1024, shuffle=False, num_workers=12, pin_memory=True, persistent_workers=True)
+    # move train and valset to gpu:
+    trainset = prepare_gpu_dataset(trainset)
+    valset = prepare_gpu_dataset(valset)
+
+    trainloader = DataLoader(trainset, batch_size=512, shuffle=True, num_workers=0, pin_memory=False) 
+    valloader = DataLoader(valset, batch_size=512, shuffle=False, num_workers=0, pin_memory=False)
 
     model = SimpleClassifier().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.009, weight_decay=5e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
     
-    scaler = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
+    gpu_augment = GPUAugmentation().to(device)
+    
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
 
     for epoch in range(epochs): 
         model.train()
         running_loss = 0.0
         for inputs, labels in trainloader:
-            inputs, labels = inputs.to(device), labels.to(device)
+            with torch.no_grad():
+                inputs = gpu_augment(inputs).contiguous()
+                
             optimizer.zero_grad()
-            with torch.amp.autocast(device_type=device.type):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            loss.backward()
+            optimizer.step()
             running_loss += loss.item()
 
         model.eval()
@@ -179,7 +191,6 @@ def train_model(epochs=5):
         total = 0
         with torch.no_grad():
             for inputs, labels in valloader:
-                inputs, labels = inputs.to(device), labels.to(device)
                 outputs = model(inputs)
                 _, predicted = torch.max(outputs.data, 1)
                 total += labels.size(0)
@@ -201,12 +212,11 @@ def run_torch_inference(model, input_tensor):
         probabilities = F.softmax(output, dim=1)
     return probabilities.cpu().numpy()
 
-def get_test_loader(batch_size=1):
+def get_test_loader(batch_size=64):
     """Returns the CIFAR-10 Test Set."""
     transform = transforms.Compose([
         transforms.ToTensor(), 
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
-    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
-
+    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
