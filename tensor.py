@@ -28,14 +28,9 @@ class TRTWrapper:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
         config = builder.create_builder_config()
         parser = trt.OnnxParser(network, self.logger)
-
-        # Enable FP16 (Half Precision)
-        if builder.platform_has_fast_fp16:
-            config.set_flag(trt.BuilderFlag.FP16)
-            print("FP16 Mode Enabled!")
         
-        # Memory Config (1GB Workspace)
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+        # Memory Config (4GB Workspace)
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
         # Parse ONNX
         with open(self.onnx_path, 'rb') as model:
@@ -90,13 +85,15 @@ class TRTWrapper:
         """
         if not self.context:
             self.load_engine()
+            
+        current_batch_size = input_data.shape[0]
 
         # Flatten Input
         input_data = input_data.ravel().astype(np.float32)
         
         # Allocate Device Memory (PyCUDA)
         d_input = cuda.mem_alloc(input_data.nbytes)
-        d_output = cuda.mem_alloc(10 * 4) # 10 classes, float32
+        d_output = cuda.mem_alloc(current_batch_size * 100 * 4) # 100 classes, float32
         
         #CUDA Stream
         stream = cuda.Stream()
@@ -110,7 +107,7 @@ class TRTWrapper:
         self.context.execute_async_v3(stream_handle=stream.handle)
         
         # Device -> Host
-        h_output = np.empty(10, dtype=np.float32)
+        h_output = np.empty(100, dtype=np.float32)
         cuda.memcpy_dtoh_async(h_output, d_output, stream)
         
         stream.synchronize()
