@@ -134,15 +134,15 @@ def train_model(epochs=5):
 
     # Data Augmentation (Crucial for larger models to prevent overfitting)
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomCrop(32, padding=4),
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
 
     transform_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     
     # CIFAR-100
@@ -150,12 +150,13 @@ def train_model(epochs=5):
     trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
     valset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
 
-    trainloader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True) 
-    valloader = DataLoader(valset, batch_size=64, shuffle=False, num_workers=8, pin_memory=True, persistent_workers=True)
+    trainloader = DataLoader(trainset, batch_size=1024, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True) 
+    valloader = DataLoader(valset, batch_size=1024, shuffle=False, num_workers=8, pin_memory=True, persistent_workers=True)
 
     model = SimpleClassifier().to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.009, weight_decay=5e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
     
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
 
@@ -186,139 +187,9 @@ def train_model(epochs=5):
         
         val_acc = 100 * correct / total
         print(f"Epoch {epoch+1}/{epochs} | Loss: {running_loss/len(trainloader):.4f} | Val Acc: {val_acc:.2f}%")
+        scheduler.step(val_acc)
     return model
 
-
-def run_torch_inference(model, input_tensor):
-    device = next(model.parameters()).device
-    
-    if input_tensor.shape[-1] != IMG_SIZE:
-        input_tensor = F.interpolate(input_tensor, size=(IMG_SIZE, IMG_SIZE))
-
-    input_tensor = input_tensor.to(device)
-    model.eval()
-    with torch.no_grad():
-        output = model(input_tensor)
-        probabilities = F.softmax(output, dim=1)
-    return probabilities.cpu().numpy()
-
-def get_device():
-    """Returns the CUDA device if available, else CPU."""
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def save_model(model, path):
-    """Saves the model weights to a .pt file."""
-    print(f"Saving model weights to {path}...")
-    torch.save(model.state_dict(), path)
-    print("Save complete.")
-
-def load_model(path, device=None):
-    """Initializes the architecture and loads weights from disk."""
-    if device is None:
-        device = get_device()
-        
-    print(f"Loading model from {path}...")
-    model = SimpleClassifier().to(device)
-    
-    if os.path.exists(path):
-        model.load_state_dict(torch.load(path, map_location=device))
-        model.eval() # Set to eval mode by default after load
-        print("Model loaded successfully.")
-        return model
-    else:
-        raise FileNotFoundError(f"No model found at {path}")
-
-def export_to_onnx(model, onnx_path):
-    """Exports a PyTorch model instance to ONNX format."""
-    device = next(model.parameters()).device
-    model.eval()
-    
-    print(f"Exporting model to {onnx_path}...")
-    
-    # Create dummy input based on device (1 image, 3 channels, 32x32)
-    dummy_input = torch.randn(1, 3, 32, 32, device=device)
-    
-    # Export
-    torch.onnx.export(model, dummy_input, onnx_path, 
-                      input_names=['input'], output_names=['output'], 
-                      dynamic_axes={'input': {0: 'batch_size'}, 'output': {0: 'batch_size'}},
-                      opset_version=18)
-    
-    print(f"Export complete: {onnx_path}")
-
-def train_model(epochs=2):
-    """
-    Trains the model and returns the trained model instance.
-    Uses Automatic Mixed Precision (AMP) for speed on RTX cards.
-    """
-    device = get_device()
-    print(f"--- Starting Training on {device} ---")
-
-    # Data Loading
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
-    
-    # Download CIFAR-100
-    trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform)
-    trainloader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=2)
-    
-    valset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
-    valloader = DataLoader(valset, batch_size=64, shuffle=False, num_workers=2)
-
-    # Setup Components
-    model = SimpleClassifier().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
-    
-    # Scaler for FP16 training
-    scaler = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
-
-    # Training Loop
-    for epoch in range(epochs): 
-        model.train()
-        running_loss = 0.0
-        
-        for inputs, labels in trainloader:
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            
-            # AMP Forward Pass
-            with torch.amp.autocast(device_type=device.type):
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-            
-            # AMP Backward Pass
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-
-            running_loss += loss.item()
-
-        # Validation Loop
-        model.eval()
-        correct = 0
-        total = 0
-        with torch.no_grad():
-            for inputs, labels in valloader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                _, predicted = torch.max(outputs.data, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
-        
-        val_acc = 100 * correct / total
-        print(f"Epoch {epoch+1}/{epochs} | Loss: {running_loss/len(trainloader):.4f} | Val Acc: {val_acc:.2f}%")
-
-    return model
-
-def get_test_loader(batch_size=1):
-    """Returns the CIFAR-10 Test Set."""
-    transform = transforms.Compose([
-        transforms.ToTensor(), 
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-    testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
-    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
 
 def run_torch_inference(model, input_tensor):
     """Runs inference on a loaded model instance."""
@@ -329,3 +200,13 @@ def run_torch_inference(model, input_tensor):
         output = model(input_tensor)
         probabilities = F.softmax(output, dim=1)
     return probabilities.cpu().numpy()
+
+def get_test_loader(batch_size=1):
+    """Returns the CIFAR-10 Test Set."""
+    transform = transforms.Compose([
+        transforms.ToTensor(), 
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
+    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
+
