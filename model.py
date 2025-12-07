@@ -38,12 +38,18 @@ class SimpleClassifier(nn.Module):
         self.bn7 = nn.BatchNorm2d(512)
         self.conv8 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
         self.bn8 = nn.BatchNorm2d(512)
-
+        
+        # --- Block 5: 1024 Channels (The Final Block) ---
+        self.conv9 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
+        self.bn9 = nn.BatchNorm2d(1024)
+        self.conv10 = nn.Conv2d(1024, 1024, kernel_size=3, padding=1)
+        self.bn10 = nn.BatchNorm2d(1024)
+        
         # --- Classifier Head ---
         # Image reduces: 32 -> 16 -> 8 -> 4 -> 2 (4 MaxPools)
-        # Final size: 512 channels * 2 * 2 pixels = 2048 features
-        self.fc1 = nn.Linear(512 * 2 * 2, 2048)
-        self.dropout = nn.Dropout(0.5) # Dropout to prevent memorization
+        # Final size: 1024 channels * 2 * 2 pixels = 4096 features
+        self.fc1 = nn.Linear(1024 * 2 * 2, 2048)
+        self.dropout = nn.Dropout(0.5) 
         self.fc2 = nn.Linear(2048, 1024)
         self.fc3 = nn.Linear(1024, NUM_CLASSES) 
 
@@ -68,6 +74,10 @@ class SimpleClassifier(nn.Module):
         x = F.relu(self.bn8(self.conv8(x)))
         x = F.max_pool2d(x, 2) # 4 -> 2
         
+        # Block 5 (No Pool - keep 2x2 spatial dims)
+        x = F.relu(self.bn9(self.conv9(x)))
+        x = F.relu(self.bn10(self.conv10(x)))
+        
         # Flatten
         x = x.view(x.size(0), -1)
         
@@ -90,7 +100,7 @@ def get_test_loader(batch_size=1):
     
     # CIFAR-100
     testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
-    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0)
+    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=4)
 
 
 def save_model(model, path):
