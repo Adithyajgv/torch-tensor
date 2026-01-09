@@ -11,95 +11,77 @@ import os
 IMG_SIZE = 32   # Native CIFAR resolution
 NUM_CLASSES = 100 # CIFAR-100
 
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResidualBlock, self).__init__()
+        
+        # --- Main Path ---
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # --- Shortcut Path ---
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x) 
+        out = F.relu(out)
+        return out
 
 class SimpleClassifier(nn.Module):
     def __init__(self):
         super(SimpleClassifier, self).__init__()
+        self.in_channels = 64
         
-        # --- Block 1: 64 Channels ---
-        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, padding=1)
+        # --- Initial Entry Block ---
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
         
-        # --- Block 2: 128 Channels ---
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.conv4 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(128)
-        
-        # --- Block 3: 256 Channels ---
-        self.conv5 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn5 = nn.BatchNorm2d(256)
-        self.conv6 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.bn6 = nn.BatchNorm2d(256)
-
-        # --- Block 4: 512 Channels (The Heavy Lifter) ---
-        self.conv7 = nn.Conv2d(256, 512, kernel_size=3, padding=1)
-        self.bn7 = nn.BatchNorm2d(512)
-        self.conv8 = nn.Conv2d(512, 512, kernel_size=3, padding=1)
-        self.bn8 = nn.BatchNorm2d(512)
-        
-        # --- Block 5: 1024 Channels (The Final Block) ---
-        self.conv9 = nn.Conv2d(512, 1024, kernel_size=3, padding=1)
-        self.bn9 = nn.BatchNorm2d(1024)
-        self.conv10 = nn.Conv2d(1024, 1024, kernel_size=3, padding=1)
-        self.bn10 = nn.BatchNorm2d(1024)
+        # --- ResNet Stages ---
+        # 64 Channels (32x32)
+        self.layer1 = self._make_layer(64, num_blocks=2, stride=1)
+        # 128 Channels (16x16)
+        self.layer2 = self._make_layer(128, num_blocks=2, stride=2)
+        # 256 Channels (8x8)
+        self.layer3 = self._make_layer(256, num_blocks=2, stride=2)
+        # 512 Channels (4x4)
+        self.layer4 = self._make_layer(512, num_blocks=2, stride=2)
         
         # --- Classifier Head ---
-        # Image reduces: 32 -> 16 -> 8 -> 4 -> 2 (4 MaxPools)
-        # Final size: 1024 channels * 2 * 2 pixels = 4096 features
-        self.fc1 = nn.Linear(1024 * 2 * 2, 2048)
-        self.dropout = nn.Dropout(0.5) 
-        self.fc2 = nn.Linear(2048, 1024)
-        self.dropout2 = nn.Dropout(0.25)
-        self.fc3 = nn.Linear(1024, 512)
-        self.dropout3 = nn.Dropout(0.125)
-        self.fc4 = nn.Linear(512, 256)
-        self.dropout4 = nn.Dropout(0.1)
-        self.fc5 = nn.Linear(256, 128)
-        self.fc6 = nn.Linear(128, NUM_CLASSES)
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512, NUM_CLASSES)
+
+    def _make_layer(self, out_channels, num_blocks, stride):
+        strides = [stride] + [1] * (num_blocks - 1)
+        layers = []
+        for stride in strides:
+            layers.append(ResidualBlock(self.in_channels, out_channels, stride))
+            self.in_channels = out_channels
+        return nn.Sequential(*layers)
 
     def forward(self, x):
-        # Block 1 + Pool
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.max_pool2d(x, 2) # 32 -> 16
+        # Initial Conv
+        out = F.relu(self.bn1(self.conv1(x)))
         
-        # Block 2 + Pool
-        x = F.relu(self.bn3(self.conv3(x)))
-        x = F.relu(self.bn4(self.conv4(x)))
-        x = F.max_pool2d(x, 2) # 16 -> 8
+        # Residual Blocks
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
         
-        # Block 3 + Pool
-        x = F.relu(self.bn5(self.conv5(x)))
-        x = F.relu(self.bn6(self.conv6(x)))
-        x = F.max_pool2d(x, 2) # 8 -> 4
-
-        # Block 4 + Pool
-        x = F.relu(self.bn7(self.conv7(x)))
-        x = F.relu(self.bn8(self.conv8(x)))
-        x = F.max_pool2d(x, 2) # 4 -> 2
-        
-        # Block 5 (No Pool - keep 2x2 spatial dims)
-        x = F.relu(self.bn9(self.conv9(x)))
-        x = F.relu(self.bn10(self.conv10(x)))
-        
-        # Flatten
-        x = x.view(x.size(0), -1)
-        
-        # Dense Layers
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
-        x = F.relu(self.fc2(x))
-        x = self.dropout2(x)
-        x = F.relu(self.fc3(x))
-        x = self.dropout3(x)
-        x = F.relu(self.fc4(x))
-        x = self.dropout4(x)
-        x = F.relu(self.fc5(x))
-        x = self.fc6(x)
-        return x
+        # Global Average Pooling & Linear
+        out = self.avg_pool(out)
+        out = out.view(out.size(0), -1)
+        out = self.fc(out)
+        return out
 
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
