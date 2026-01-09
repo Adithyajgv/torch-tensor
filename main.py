@@ -87,7 +87,7 @@ def main():
     elif args.action == 'validate':
         print(f"\n[ACTION] Standalone Validation ({args.backend.upper()})")
         
-        test_loader = model.get_test_loader(batch_size=1)
+        test_loader = model.get_test_loader(batch_size=64)
         
         if args.backend == 'torch':
             loaded_model = model.load_model(args.model_path)

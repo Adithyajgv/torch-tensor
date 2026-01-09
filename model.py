@@ -11,6 +11,7 @@ import os
 IMG_SIZE = 32   # Native CIFAR resolution
 NUM_CLASSES = 100 # CIFAR-100
 
+
 class SimpleClassifier(nn.Module):
     def __init__(self):
         super(SimpleClassifier, self).__init__()
@@ -51,7 +52,13 @@ class SimpleClassifier(nn.Module):
         self.fc1 = nn.Linear(1024 * 2 * 2, 2048)
         self.dropout = nn.Dropout(0.5) 
         self.fc2 = nn.Linear(2048, 1024)
-        self.fc3 = nn.Linear(1024, NUM_CLASSES) 
+        self.dropout2 = nn.Dropout(0.25)
+        self.fc3 = nn.Linear(1024, 512)
+        self.dropout3 = nn.Dropout(0.125)
+        self.fc4 = nn.Linear(512, 256)
+        self.dropout4 = nn.Dropout(0.1)
+        self.fc5 = nn.Linear(256, 128)
+        self.fc6 = nn.Linear(128, NUM_CLASSES)
 
     def forward(self, x):
         # Block 1 + Pool
@@ -85,8 +92,13 @@ class SimpleClassifier(nn.Module):
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
-        x = self.dropout(x)
-        x = self.fc3(x)
+        x = self.dropout2(x)
+        x = F.relu(self.fc3(x))
+        x = self.dropout3(x)
+        x = F.relu(self.fc4(x))
+        x = self.dropout4(x)
+        x = F.relu(self.fc5(x))
+        x = self.fc6(x)
         return x
 
 def get_device():
@@ -109,6 +121,7 @@ def save_model(model, path):
     torch.save(model.state_dict(), path)
     print("Save complete.")
 
+
 def load_model(path, device=None):
     if device is None:
         device = get_device()
@@ -120,6 +133,7 @@ def load_model(path, device=None):
         return model
     else:
         raise FileNotFoundError(f"No model found at {path}")
+
 
 def export_to_onnx(model, onnx_path):
     os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
@@ -159,9 +173,9 @@ def train_model(epochs=5):
     trainset = torchvision.datasets.CIFAR100(root='./data', train=True, download=True, transform=transform_train)
     valset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform_test)
 
-    trainloader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True) 
-    valloader = DataLoader(valset, batch_size=64, shuffle=False, num_workers=6, pin_memory=True, persistent_workers=True)
-
+    trainloader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=2, pin_memory=True, persistent_workers=True) 
+    valloader = DataLoader(valset, batch_size=64, shuffle=False, num_workers=2, pin_memory=True, persistent_workers=True)
+    print("Data loaded.")
     model = SimpleClassifier().to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
@@ -216,4 +230,4 @@ def get_test_loader(batch_size=64):
         transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
     ])
     testset = torchvision.datasets.CIFAR100(root='./data', train=False, download=True, transform=transform)
-    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+    return DataLoader(testset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=False)
