@@ -160,7 +160,7 @@ def train_model(epochs=5):
     print("Data loaded.")
     model = SimpleClassifier().to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=1e-4)
+    optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', patience=3, factor=0.5)
     
     scaler = torch.amp.GradScaler(device.type, enabled=(device.type == 'cuda'))
